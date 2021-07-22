@@ -1,12 +1,14 @@
 import {m} from 'malevic';
-import SiteToggle from '../site-toggle';
-import MoreToggleSettings from './more-toggle-settings';
-import WatchIcon from './watch-icon';
 import {Shortcut, Toggle} from '../../../controls';
 import {getLocalMessage} from '../../../../utils/locales';
-import {ExtWrapper, TabInfo} from '../../../../definitions';
+import type {ExtWrapper, TabInfo} from '../../../../definitions';
+import SunMoonIcon from '../../main-page/sun-moon-icon';
+import SystemIcon from '../../main-page/system-icon';
+import WatchIcon from '../../main-page/watch-icon';
+import SiteToggle from '../site-toggle';
+import MoreToggleSettings from './more-toggle-settings';
 
-function multiline(...lines) {
+function multiline(...lines: string[]) {
     return lines.join('\n');
 }
 
@@ -16,7 +18,6 @@ type HeaderProps = ExtWrapper & {
 };
 
 function Header({data, actions, tab, onMoreToggleSettingsClick}: HeaderProps) {
-
     function toggleExtension(enabled) {
         actions.changeSettings({
             enabled,
@@ -24,12 +25,16 @@ function Header({data, actions, tab, onMoreToggleSettingsClick}: HeaderProps) {
         });
     }
 
+    const isAutomation = Boolean(data.settings.automation);
     const isTimeAutomation = data.settings.automation === 'time';
+    const isLocationAutomation = data.settings.automation === 'location';
     const now = new Date();
 
     return (
         <header class="header">
-            <img class="header__logo" src="../assets/images/darkreader-type.svg" alt="Dark Reader" />
+            <a class="header__logo" href="https://darkreader.org/" target="_blank" rel="noopener noreferrer">
+                Dark Reader
+            </a>
             <div class="header__control header__site-toggle">
                 <SiteToggle
                     data={data}
@@ -74,12 +79,14 @@ function Header({data, actions, tab, onMoreToggleSettingsClick}: HeaderProps) {
                 <span
                     class={{
                         'header__app-toggle__time': true,
-                        'header__app-toggle__time--active': isTimeAutomation,
+                        'header__app-toggle__time--active': isAutomation,
                     }}
                 >
                     {(isTimeAutomation
                         ? <WatchIcon hours={now.getHours()} minutes={now.getMinutes()} />
-                        : null)}
+                        : (isLocationAutomation
+                            ? (<SunMoonIcon date={now} latitude={data.settings.location.latitude} longitude={data.settings.location.longitude} />)
+                            : <SystemIcon />))}
                 </span>
             </div>
         </header>

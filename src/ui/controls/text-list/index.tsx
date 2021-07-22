@@ -19,7 +19,7 @@ export default function TextList(props: TextListProps) {
         const index = context.store.indices.get(e.target);
         const values = props.values.slice();
         const value = e.target.value.trim();
-        if (values.indexOf(value) >= 0) {
+        if (values.includes(value)) {
             return;
         }
 
@@ -40,8 +40,7 @@ export default function TextList(props: TextListProps) {
             <TextBox
                 class="text-list__textbox"
                 value={text}
-                attached={saveIndex}
-                updated={saveIndex}
+                onrender={saveIndex}
                 placeholder={props.placeholder}
             />
         );
@@ -82,7 +81,7 @@ export default function TextList(props: TextListProps) {
                 <div
                     class={['text-list', props.class]}
                     onchange={onTextChange}
-                    attached={didMount}
+                    oncreate={didMount}
                 />
             )}
             items={props.values

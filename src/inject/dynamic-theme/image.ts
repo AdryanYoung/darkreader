@@ -1,8 +1,9 @@
 import {getSVGFilterMatrixValue} from '../../generators/svg-filter';
 import {bgFetch} from './network';
-import {getURLHost} from '../../utils/url';
 import {loadAsDataURL} from '../../utils/network';
-import {FilterConfig} from '../../definitions';
+import type {FilterConfig} from '../../definitions';
+import {logInfo, logWarn} from '../utils/log';
+import AsyncQueue from '../../utils/async-queue';
 
 export interface ImageDetails {
     src: string;
@@ -13,28 +14,36 @@ export interface ImageDetails {
     isLight: boolean;
     isTransparent: boolean;
     isLarge: boolean;
+    isTooLarge: boolean;
 }
 
+const imageManager = new AsyncQueue();
+
 export async function getImageDetails(url: string) {
-    let dataURL: string;
-    if (url.startsWith('data:')) {
-        dataURL = url;
-    } else {
-        dataURL = await getImageDataURL(url);
-    }
-    const image = await urlToImage(dataURL);
-    const info = analyzeImage(image);
-    return {
-        src: url,
-        dataURL,
-        width: image.naturalWidth,
-        height: image.naturalHeight,
-        ...info,
-    };
+    return new Promise<ImageDetails>(async (resolve) => {
+        let dataURL: string;
+        if (url.startsWith('data:')) {
+            dataURL = url;
+        } else {
+            dataURL = await getImageDataURL(url);
+        }
+
+        const image = await urlToImage(dataURL);
+        imageManager.addToQueue(() => {
+            resolve({
+                src: url,
+                dataURL,
+                width: image.naturalWidth,
+                height: image.naturalHeight,
+                ...analyzeImage(image),
+            });
+        });
+    });
 }
 
 async function getImageDataURL(url: string) {
-    if (getURLHost(url) === location.host) {
+    const parsedURL = new URL(url);
+    if (parsedURL.origin === location.origin) {
         return await loadAsDataURL(url);
     }
     return await bgFetch({url, responseType: 'data-url'});
@@ -49,20 +58,62 @@ async function urlToImage(url: string) {
     });
 }
 
-function analyzeImage(image: HTMLImageElement) {
-    const MAX_ANALIZE_PIXELS_COUNT = 32 * 32;
+const MAX_ANALIZE_PIXELS_COUNT = 32 * 32;
+let canvas: HTMLCanvasElement | OffscreenCanvas;
+let context: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
-    const naturalPixelsCount = image.naturalWidth * image.naturalHeight;
-    const k = Math.min(1, Math.sqrt(MAX_ANALIZE_PIXELS_COUNT / naturalPixelsCount));
-    const width = Math.max(1, Math.round(image.naturalWidth * k));
-    const height = Math.max(1, Math.round(image.naturalHeight * k));
-
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const context = canvas.getContext('2d');
+function createCanvas() {
+    const maxWidth = MAX_ANALIZE_PIXELS_COUNT;
+    const maxHeight = MAX_ANALIZE_PIXELS_COUNT;
+    canvas = document.createElement('canvas');
+    canvas.width = maxWidth;
+    canvas.height = maxHeight;
+    context = canvas.getContext('2d');
     context.imageSmoothingEnabled = false;
-    context.drawImage(image, 0, 0, width, height);
+}
+
+function removeCanvas() {
+    canvas = null;
+    context = null;
+}
+
+// 5MB
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+
+function analyzeImage(image: HTMLImageElement) {
+    if (!canvas) {
+        createCanvas();
+    }
+    const {naturalWidth, naturalHeight} = image;
+    if (naturalHeight === 0 || naturalWidth === 0) {
+        logWarn(`logWarn(Image is empty ${image.currentSrc})`);
+        return null;
+    }
+
+    // Get good appromized image size in memory terms.
+    // Width * Height * 4(R, G, B, A) and 500B(metadata) because rgba can contain up to 3 digits.
+    const size = naturalWidth * naturalHeight * 4;
+    // Is it over ~5MB? Let's not decode the image, it's something that's useless to analyze.
+    // And very performance senstive for the browser to decode this image(~50ms) and take into account
+    // It's being async `drawImage` calls.
+    if (size > MAX_IMAGE_SIZE) {
+        logInfo('Skipped large image analyzing(Larger than 5mb in memory)');
+        return {
+            isDark: false,
+            isLight: false,
+            isTransparent: false,
+            isLarge: false,
+            isTooLarge: true,
+        };
+    }
+
+    const naturalPixelsCount = naturalWidth * naturalHeight;
+    const k = Math.min(1, Math.sqrt(MAX_ANALIZE_PIXELS_COUNT / naturalPixelsCount));
+    const width = Math.ceil(naturalWidth * k);
+    const height = Math.ceil(naturalHeight * k);
+    context.clearRect(0, 0, width, height);
+
+    context.drawImage(image, 0, 0, naturalWidth, naturalHeight, 0, 0, width, height);
     const imageData = context.getImageData(0, 0, width, height);
     const d = imageData.data;
 
@@ -76,7 +127,7 @@ function analyzeImage(image: HTMLImageElement) {
 
     let i: number, x: number, y: number;
     let r: number, g: number, b: number, a: number;
-    let l: number, min: number, max: number;
+    let l: number;
     for (y = 0; y < height; y++) {
         for (x = 0; x < width; x++) {
             i = 4 * (y * width + x);
@@ -88,9 +139,9 @@ function analyzeImage(image: HTMLImageElement) {
             if (a < TRANSPARENT_ALPHA_THRESHOLD) {
                 transparentPixelsCount++;
             } else {
-                min = Math.min(r, g, b);
-                max = Math.max(r, g, b);
-                l = (max + min) / 2;
+                // Use sRGB to determine the `pixel Lightness`
+                // https://en.wikipedia.org/wiki/Relative_luminance
+                l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
                 if (l < DARK_LIGHTNESS_THRESHOLD) {
                     darkPixelsCount++;
                 }
@@ -114,11 +165,13 @@ function analyzeImage(image: HTMLImageElement) {
         isLight: ((lightPixelsCount / opaquePixelsCount) >= LIGHT_IMAGE_THRESHOLD),
         isTransparent: ((transparentPixelsCount / totalPixelsCount) >= TRANSPARENT_IMAGE_THRESHOLD),
         isLarge: (naturalPixelsCount >= LARGE_IMAGE_PIXELS_COUNT),
+        isTooLarge: false,
     };
 }
 
-export function getFilteredImageDataURL({dataURL, width, height}: ImageDetails, filter: FilterConfig) {
-    const matrix = getSVGFilterMatrixValue(filter);
+
+export function getFilteredImageDataURL({dataURL, width, height}: ImageDetails, theme: FilterConfig): string {
+    const matrix = getSVGFilterMatrixValue(theme);
     const svg = [
         `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}">`,
         '<defs>',
@@ -129,11 +182,10 @@ export function getFilteredImageDataURL({dataURL, width, height}: ImageDetails, 
         `<image width="${width}" height="${height}" filter="url(#darkreader-image-filter)" xlink:href="${dataURL}" />`,
         '</svg>',
     ].join('');
-    const bytes = new Uint8Array(svg.length);
-    for (let i = 0; i < svg.length; i++) {
-        bytes[i] = svg.charCodeAt(i);
-    }
-    const blob = new Blob([bytes], {type: 'image/svg+xml'});
-    const objectURL = URL.createObjectURL(blob);
-    return objectURL;
+    return `data:image/svg+xml;base64,${btoa(svg)}`;
+}
+
+export function cleanImageProcessingCache() {
+    imageManager && imageManager.stopQueue();
+    removeCanvas();
 }

@@ -1,11 +1,19 @@
-async function getOKResponse(url: string, mimeType?: string) {
+import {isFirefox} from './platform';
+
+async function getOKResponse(url: string, mimeType?: string, origin?: string) {
     const response = await fetch(
         url,
         {
             cache: 'force-cache',
             credentials: 'omit',
+            referrer: origin
         },
     );
+
+    // Firefox bug, content type is "application/x-unknown-content-type"
+    if (isFirefox && mimeType === 'text/css' && url.startsWith('moz-extension://') && url.endsWith('.css')) {
+        return response;
+    }
 
     if (mimeType && !response.headers.get('Content-Type').startsWith(mimeType)) {
         throw new Error(`Mime type mismatch when loading ${url}`);
@@ -20,6 +28,10 @@ async function getOKResponse(url: string, mimeType?: string) {
 
 export async function loadAsDataURL(url: string, mimeType?: string) {
     const response = await getOKResponse(url, mimeType);
+    return await readResponseAsDataURL(response);
+}
+
+export async function readResponseAsDataURL(response: Response) {
     const blob = await response.blob();
     const dataURL = await (new Promise<string>((resolve) => {
         const reader = new FileReader();
@@ -29,8 +41,7 @@ export async function loadAsDataURL(url: string, mimeType?: string) {
     return dataURL;
 }
 
-export async function loadAsText(url: string, mimeType?: string) {
-    const response = await getOKResponse(url, mimeType);
-    const text = await response.text();
-    return text;
+export async function loadAsText(url: string, mimeType?: string, origin?: string) {
+    const response = await getOKResponse(url, mimeType, origin);
+    return await response.text();
 }
